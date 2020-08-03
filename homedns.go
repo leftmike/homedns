@@ -1,20 +1,21 @@
 package main
 
 /*
-- API key with reduced permissions
+- set config directly rather than via environment
+- update readme with install and usage instructions
 - run on BeagleBone connected to DSL modem
 */
 
 import (
-	"context"
 	"flag"
 	"log"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/libdns/libdns"
-	r53 "github.com/libdns/route53"
 	ipify "github.com/rdegges/go-ipify"
 )
 
@@ -71,6 +72,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	setFails := 0
 	for {
 		ip, err := ipify.GetIp()
 		if err != nil {
@@ -80,16 +82,14 @@ func main() {
 			log.Printf("current ip: %s\n", ip)
 		}
 
-		p := r53.Provider{}
-		err = p.NewSession()
+		sess, err := session.NewSession()
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		ctx := context.Background()
+		svc := route53.New(sess)
 
 		for domain, hosts := range domains {
-			recs, err := p.GetRecords(ctx, domain)
+			recs, err := GetRecords(svc, domain)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -119,16 +119,28 @@ func main() {
 							Type:  "A",
 							Name:  host,
 							Value: ip,
-							TTL:   ttl / time.Second,
+							TTL:   ttl,
 						})
 				}
-				_, err = p.SetRecords(ctx, domain, recs)
+
+				log.Printf("updating %d record(s)\n", len(updates))
+
+				err = SetRecords(svc, domain, recs)
 				if err != nil {
-					log.Fatal(err)
+					setFails += 1
+					if setFails > 3 {
+						log.Fatal(err)
+					}
+					log.Printf("set records failed %d time(s)", setFails)
+					log.Print(err)
+				} else {
+					setFails = 0
 				}
 				for _, host := range updates {
 					log.Printf("set %s to %s for %s\n", host, ip, ttl)
 				}
+			} else {
+				setFails = 0
 			}
 		}
 
