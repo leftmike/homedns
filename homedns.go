@@ -1,8 +1,6 @@
 package main
 
 /*
-- set config directly rather than via environment
-- update readme with install and usage instructions
 - run on BeagleBone connected to DSL modem
 */
 
@@ -13,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
 	"github.com/libdns/libdns"
@@ -60,11 +60,12 @@ func main() {
 		domains[domain] = append(domains[domain], host)
 	}
 
+	var cfg aws.Config
 	if *profileFlag != "" {
-		os.Setenv("AWS_PROFILE", *profileFlag)
+		cfg.Credentials = credentials.NewSharedCredentials("", *profileFlag)
 	}
 	if *regionFlag != "" {
-		os.Setenv("AWS_REGION", *regionFlag)
+		cfg.Region = aws.String(*regionFlag)
 	}
 
 	ttl, err := time.ParseDuration(*ttlFlag)
@@ -72,75 +73,69 @@ func main() {
 		log.Fatal(err)
 	}
 
-	setFails := 0
+	var currentIP string
 	for {
 		ip, err := ipify.GetIp()
 		if err != nil {
 			log.Fatal(err)
 		}
-		if *verboseFlag {
-			log.Printf("current ip: %s\n", ip)
-		}
 
-		sess, err := session.NewSession()
-		if err != nil {
-			log.Fatal(err)
-		}
-		svc := route53.New(sess)
+		if ip != currentIP {
+			log.Printf("ip: %s\n", ip)
+			currentIP = ip
 
-		for domain, hosts := range domains {
-			recs, err := GetRecords(svc, domain)
+			sess, err := session.NewSession(&cfg)
 			if err != nil {
 				log.Fatal(err)
 			}
-			if *verboseFlag {
-				log.Printf("records: %s\n", recs)
-			}
+			svc := route53.New(sess)
 
-			var updates []string
-			for _, host := range hosts {
-				needUpdate := true
-				for _, rec := range recs {
-					if rec.Type == "A" && rec.Name == host && rec.Value == ip {
-						needUpdate = false
-						break
+			for domain, hosts := range domains {
+				recs, err := GetRecords(svc, domain)
+				if err != nil {
+					log.Fatal(err)
+				}
+				if *verboseFlag {
+					log.Printf("records: %s\n", recs)
+				}
+
+				var updates []string
+				for _, host := range hosts {
+					needUpdate := true
+					for _, rec := range recs {
+						if rec.Type == "A" && rec.Name == host && rec.Value == ip {
+							needUpdate = false
+							break
+						}
+					}
+					if needUpdate {
+						updates = append(updates, host)
 					}
 				}
-				if needUpdate {
-					updates = append(updates, host)
-				}
-			}
 
-			if len(updates) > 0 {
-				var recs []libdns.Record
-				for _, host := range updates {
-					recs = append(recs,
-						libdns.Record{
-							Type:  "A",
-							Name:  host,
-							Value: ip,
-							TTL:   ttl,
-						})
-				}
+				if len(updates) > 0 {
+					var recs []libdns.Record
+					for _, host := range updates {
+						recs = append(recs,
+							libdns.Record{
+								Type:  "A",
+								Name:  host,
+								Value: ip,
+								TTL:   ttl,
+							})
+					}
 
-				log.Printf("updating %d record(s)\n", len(updates))
+					log.Printf("updating %d record(s)\n", len(updates))
 
-				err = SetRecords(svc, domain, recs)
-				if err != nil {
-					setFails += 1
-					if setFails > 3 {
+					err = SetRecords(svc, domain, recs)
+					if err != nil {
 						log.Fatal(err)
 					}
-					log.Printf("set records failed %d time(s)", setFails)
-					log.Print(err)
-				} else {
-					setFails = 0
+
+					for _, host := range updates {
+						log.Printf("set %s to %s for %s\n", host, ip, ttl)
+					}
 				}
-				for _, host := range updates {
-					log.Printf("set %s to %s for %s\n", host, ip, ttl)
-				}
-			} else {
-				setFails = 0
 			}
 		}
 
